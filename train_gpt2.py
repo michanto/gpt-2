@@ -94,6 +94,23 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+    def forward(self, idx):
+        # idx and targets are both (B, T) tensor of integers
+        B, T = idx.size()
+        assert T <= self.config.block_size, "Cannot forward sequence of length {T}, model block size is exhausted."
+        # forward the token and position embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # Shape T
+        pos_emb = self.transformer.wpe(pos) # Shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # Shape (B, T, n_embd)
+        x = pos_emb + tok_emb # Shape (B, T, n_embd)
+        # forward the transformer blocks
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layer norm and the classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # Shape (B, T, vocab_size)
+        return logits
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from hugging face"""
@@ -147,5 +164,38 @@ class GPT(nn.Module):
 # ------------------------------------------------------------------
 print("Loading model")
 model = GPT.from_pretrained('gpt2')
+model.eval()
+model.to('cuda')
 print("model loaded - didn't crash yay!")
+num_return_sequences = 5
+max_length = 30
+
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+tokens = enc.encode("Hello, I'm a language model.")
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+x = tokens.to('cuda')
+print("Generating")
+
+# generate!  right now x is B, T where B = 5, T = 8
+# set the seed to 42
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits = model(x)
+        # get the last token and sample from the distribution
+        logits = logits[:, -1, :] # B, T, vocab_size -> B, vocab_size
+        probs = F.softmax(logits, dim=-1) # B, vocab_size
+        topk_progs, topk_indices = torch.topk(probs, k=50, dim=-1) # B, 5
+        # sample from the distribution
+        ix = torch.multinomial(topk_progs, num_samples=1) # B, 1
+        xcol = torch.gather(topk_indices, dim=-1, index=ix) # B, 1
+        x = torch.cat((x, xcol), dim=1) # B, T+1
+
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
 # ------------------------------------------------------------------
